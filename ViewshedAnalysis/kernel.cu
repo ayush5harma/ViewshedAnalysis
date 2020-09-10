@@ -1,121 +1,323 @@
+/*This file contains the kernel code for the GPU Implementation of R3 and R2 Algorithms*/
 
-#include "cuda_runtime.h"
-#include "device_launch_parameters.h"
-
+#include <cuda_runtime.h>
+#include <device_launch_parameters.h>
+#include "npp.h"
 #include <stdio.h>
+#include <math.h>
+#include "kernel.h"
+#include <cstdlib>
+#include <cmath>
 
-cudaError_t addWithCuda(int *c, const int *a, const int *b, unsigned int size);
 
-__global__ void addKernel(int *c, const int *a, const int *b)
+#define BLOCK_DIM 512
+
+//R3 kernel code
+__global__ void cudaR3(vs_t* viewshed, elev_t* elev, elev_t observer_elev, int minX, int maxX, int minY, int maxY, int observerX, int observerY, int ncols)
 {
-    int i = threadIdx.x;
-    c[i] = a[i] + b[i];
+	int col = blockIdx.x * blockDim.x + threadIdx.x;
+	int row = blockIdx.y * blockDim.y + threadIdx.y;
+
+
+	int width = (maxX - minX) + 1;
+	int height = (maxY - minY) + 1;
+
+	if (width <= col || height <= row)
+	{
+		return;
+	}
+
+
+
+
+
+
+
+	int x = col + minX;
+	int y = row + minY;
+
+	int index = (x + y * ncols);
+
+	if (x == observerX && y == observerY)
+	{
+		viewshed[index] = 1;
+	}
+
+	int x1 = observerX;
+	int y1 = observerY;
+	int x2 = x;
+	int y2 = y;
+
+	int delta_x(x2 - x1);
+	// if x1 == x2, then it does not matter what we set here
+	signed char const ix((delta_x > 0) - (delta_x < 0));
+	delta_x = std::abs(delta_x) << 1;
+
+	int delta_y(y2 - y1);
+	// if y1 == y2, then it does not matter what we set here
+	signed char const iy((delta_y > 0) - (delta_y < 0));
+	delta_y = std::abs(delta_y) << 1;
+
+
+	float maxGradient = -10000;
+
+	if (delta_x >= delta_y)
+	{
+		// error may go below zero
+		int error(delta_y - (delta_x >> 1));
+
+		while (x1 != x2)
+		{
+			if ((error >= 0) && (error || (ix > 0)))
+			{
+				error -= delta_x;
+				y1 += iy;
+			}
+			// else do nothing
+
+			error += delta_y;
+			x1 += ix;
+
+
+			int deltaY = y1 - observerY;
+			int deltaX = x1 - observerX;
+			float dist2 = deltaX * deltaX + deltaY * deltaY;
+			int currentIndex = (x1 + y1 * ncols);
+			double diff_elev = elev[currentIndex] - observer_elev;
+			float gradient = (diff_elev * diff_elev) / dist2;
+			if (diff_elev < 0) gradient *= -1;
+
+			if (y1 == y && x1 == x)
+			{
+				if (gradient > maxGradient)
+				{
+					viewshed[index] = 1;
+				}
+				else
+				{
+					viewshed[index] = 0;
+				}
+			}
+			else
+			{
+				if (gradient > maxGradient)
+				{
+					maxGradient = gradient;
+				}
+			}
+
+		}
+	}
+	else
+	{
+		// error may go below zero
+		int error(delta_x - (delta_y >> 1));
+
+		while (y1 != y2)
+		{
+			if ((error >= 0) && (error || (iy > 0)))
+			{
+				error -= delta_y;
+				x1 += ix;
+			}
+			// else do nothing
+
+			error += delta_x;
+			y1 += iy;
+
+			int deltaY = y1 - observerY;
+			int deltaX = x1 - observerX;
+			float dist2 = deltaX * deltaX + deltaY * deltaY;
+
+			int currentIndex = (x1 + y1 * ncols);
+
+			double diff_elev = elev[currentIndex] - observer_elev;
+			float gradient = (diff_elev * diff_elev) / dist2;
+			if (diff_elev < 0) gradient *= -1;
+			if (y1 == y && x1 == x)
+			{
+				if (gradient > maxGradient)
+				{
+					viewshed[index] = 1;
+				}
+				else
+				{
+					viewshed[index] = 0;
+				}
+			}
+			else
+			{
+				if (gradient > maxGradient)
+				{
+					maxGradient = gradient;
+				}
+			}
+
+		}
+	}
 }
 
-int main()
+//R2 Kernel code
+__global__ void cudaR2(vs_t* viewshed, elev_t* elev, elev_t observer_elev, int minX, int maxX, int minY, int maxY, int observerX, int observerY, int ncols)
 {
-    const int arraySize = 5;
-    const int a[arraySize] = { 1, 2, 3, 4, 5 };
-    const int b[arraySize] = { 10, 20, 30, 40, 50 };
-    int c[arraySize] = { 0 };
 
-    // Add vectors in parallel.
-    cudaError_t cudaStatus = addWithCuda(c, a, b, arraySize);
-    if (cudaStatus != cudaSuccess) {
-        fprintf(stderr, "addWithCuda failed!");
-        return 1;
-    }
+	int idx = blockIdx.x * blockDim.x + threadIdx.x;
 
-    printf("{1,2,3,4,5} + {10,20,30,40,50} = {%d,%d,%d,%d,%d}\n",
-        c[0], c[1], c[2], c[3], c[4]);
+	int width = (maxX - minX) + 1;
+	int height = (maxY - minY) + 1;
 
-    // cudaDeviceReset must be called before exiting in order for profiling and
-    // tracing tools such as Nsight and Visual Profiler to show complete traces.
-    cudaStatus = cudaDeviceReset();
-    if (cudaStatus != cudaSuccess) {
-        fprintf(stderr, "cudaDeviceReset failed!");
-        return 1;
-    }
+	int totalCell = ((width + height) * 2) - 4;
 
-    return 0;
+	if (idx >= totalCell)
+	{
+		return;
+	}
+
+	int x, y;
+	if (idx < width)
+	{
+		x = minX + idx;
+		y = minY;
+		//return;
+	}
+	else if (idx >= width && idx < width + height - 1)
+	{
+		x = maxX;
+		y = minY + (idx + 1) - width;
+		//return;
+	}
+	else if (idx >= width + height - 1 && idx < width + height + width - 2)
+	{
+		x = maxX - ((idx + 1) - (width + height - 1));
+		y = maxY;
+	}
+	else if (idx >= width + height + width - 2 && idx < totalCell)
+	{
+		x = minX;
+		y = maxY - ((idx + 1) - (width + height + width - 2));
+	}
+
+
+	int x1 = observerX;
+	int y1 = observerY;
+	int x2 = x;
+	int y2 = y;
+
+	int delta_x(x2 - x1);
+	// if x1 == x2, then it does not matter what we set here
+	signed char const ix((delta_x > 0) - (delta_x < 0));
+	delta_x = std::abs(delta_x) << 1;
+
+	int delta_y(y2 - y1);
+	// if y1 == y2, then it does not matter what we set here
+	signed char const iy((delta_y > 0) - (delta_y < 0));
+	delta_y = std::abs(delta_y) << 1;
+
+
+	float maxGradient = -10000;
+
+	if (delta_x >= delta_y)
+	{
+		// error may go below zero
+		int error(delta_y - (delta_x >> 1));
+
+		while (x1 != x2)
+		{
+			if ((error >= 0) && (error || (ix > 0)))
+			{
+				error -= delta_x;
+				y1 += iy;
+			}
+			// else do nothing
+
+			error += delta_y;
+			x1 += ix;
+
+
+			int currentIndex = (x1 + y1 * ncols);
+			int deltaY = y1 - observerY;
+			int deltaX = x1 - observerX;
+			float dist2 = deltaX * deltaX + deltaY * deltaY;
+
+			double diff_elev = elev[currentIndex] - observer_elev;
+			float gradient = (diff_elev * diff_elev) / dist2;
+			if (diff_elev < 0) gradient *= -1;
+
+			if (gradient > maxGradient)
+			{
+				maxGradient = gradient;
+				viewshed[currentIndex] = 1;
+			}
+			else
+			{
+				viewshed[currentIndex] = 0;
+			}
+		}
+	}
+	else
+	{
+		// error may go below zero
+		int error(delta_x - (delta_y >> 1));
+
+		while (y1 != y2)
+		{
+			if ((error >= 0) && (error || (iy > 0)))
+			{
+				error -= delta_y;
+				x1 += ix;
+			}
+			// else do nothing
+
+			error += delta_x;
+			y1 += iy;
+
+			int currentIndex = (x1 + y1 * ncols);
+
+			int deltaY = y1 - observerY;
+			int deltaX = x1 - observerX;
+			float dist2 = deltaX * deltaX + deltaY * deltaY;
+
+			double diff_elev = elev[currentIndex] - observer_elev;
+			float gradient = (diff_elev * diff_elev) / dist2;
+			if (diff_elev < 0) gradient *= -1;
+
+			if (gradient > maxGradient)
+			{
+				maxGradient = gradient;
+				viewshed[currentIndex] = 1;
+			}
+			else
+			{
+				viewshed[currentIndex] = 0;
+			}
+
+		}
+	}
 }
 
-// Helper function for using CUDA to add vectors in parallel.
-cudaError_t addWithCuda(int *c, const int *a, const int *b, unsigned int size)
+//Wrapper for R3 kernel
+void cudaR3Wrapper(vs_t * viewshed, elev_t * elev, elev_t observer_elev, int minX, int maxX, int minY, int maxY, int observerX, int observerY, int ncols)
 {
-    int *dev_a = 0;
-    int *dev_b = 0;
-    int *dev_c = 0;
-    cudaError_t cudaStatus;
+	int width = (maxX - minX) + 1;
+	int height = (maxY - minY) + 1;
 
-    // Choose which GPU to run on, change this on a multi-GPU system.
-    cudaStatus = cudaSetDevice(0);
-    if (cudaStatus != cudaSuccess) {
-        fprintf(stderr, "cudaSetDevice failed!  Do you have a CUDA-capable GPU installed?");
-        goto Error;
-    }
+	dim3 dimBlock(32, 32);
 
-    // Allocate GPU buffers for three vectors (two input, one output)    .
-    cudaStatus = cudaMalloc((void**)&dev_c, size * sizeof(int));
-    if (cudaStatus != cudaSuccess) {
-        fprintf(stderr, "cudaMalloc failed!");
-        goto Error;
-    }
-
-    cudaStatus = cudaMalloc((void**)&dev_a, size * sizeof(int));
-    if (cudaStatus != cudaSuccess) {
-        fprintf(stderr, "cudaMalloc failed!");
-        goto Error;
-    }
-
-    cudaStatus = cudaMalloc((void**)&dev_b, size * sizeof(int));
-    if (cudaStatus != cudaSuccess) {
-        fprintf(stderr, "cudaMalloc failed!");
-        goto Error;
-    }
-
-    // Copy input vectors from host memory to GPU buffers.
-    cudaStatus = cudaMemcpy(dev_a, a, size * sizeof(int), cudaMemcpyHostToDevice);
-    if (cudaStatus != cudaSuccess) {
-        fprintf(stderr, "cudaMemcpy failed!");
-        goto Error;
-    }
-
-    cudaStatus = cudaMemcpy(dev_b, b, size * sizeof(int), cudaMemcpyHostToDevice);
-    if (cudaStatus != cudaSuccess) {
-        fprintf(stderr, "cudaMemcpy failed!");
-        goto Error;
-    }
-
-    // Launch a kernel on the GPU with one thread for each element.
-    addKernel<<<1, size>>>(dev_c, dev_a, dev_b);
-
-    // Check for any errors launching the kernel
-    cudaStatus = cudaGetLastError();
-    if (cudaStatus != cudaSuccess) {
-        fprintf(stderr, "addKernel launch failed: %s\n", cudaGetErrorString(cudaStatus));
-        goto Error;
-    }
-    
-    // cudaDeviceSynchronize waits for the kernel to finish, and returns
-    // any errors encountered during the launch.
-    cudaStatus = cudaDeviceSynchronize();
-    if (cudaStatus != cudaSuccess) {
-        fprintf(stderr, "cudaDeviceSynchronize returned error code %d after launching addKernel!\n", cudaStatus);
-        goto Error;
-    }
-
-    // Copy output vector from GPU buffer to host memory.
-    cudaStatus = cudaMemcpy(c, dev_c, size * sizeof(int), cudaMemcpyDeviceToHost);
-    if (cudaStatus != cudaSuccess) {
-        fprintf(stderr, "cudaMemcpy failed!");
-        goto Error;
-    }
-
-Error:
-    cudaFree(dev_c);
-    cudaFree(dev_a);
-    cudaFree(dev_b);
-    
-    return cudaStatus;
+	dim3 dimGrid((int)std::ceil((float)((float)width / (float)dimBlock.x)), (int)std::ceil((float)((float)height / (float)dimBlock.y)));
+	cudaR3 << <dimGrid, dimBlock >> > (viewshed, elev, observer_elev, minX, maxX, minY, maxY, observerX, observerY, ncols);
 }
+
+//Wrapper for R2 kernel
+void cudaR2Wrapper(vs_t * viewshed, elev_t * elev, elev_t observer_elev, int minX, int maxX, int minY, int maxY, int observerX, int observerY, int ncols)
+{
+	int width = (maxX - minX) + 1;
+	int height = (maxY - minY) + 1;
+
+
+	int totalCell = ((width + height) * 2) - 4;
+
+
+	int size = (int)std::ceil((float)((float)totalCell / (float)1024));
+	cudaR2 << <size, 1024 >> > (viewshed, elev, observer_elev, minX, maxX, minY, maxY, observerX, observerY, ncols);
+}
+
